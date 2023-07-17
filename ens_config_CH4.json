@@ -71,6 +71,16 @@
 	"CONTROL_VECTOR_EMIS" : {
 		"CH4":"CH4"
 	},
+	"comment100" : "***************************SPECIAL STATE VECTOR ENTRIES***********************",
+	"SPECIAL_TARGET_IN_HEMCO" : {
+		"OH":"* GLOBAL_OH"
+	},
+	"SPECIAL_ENTRY_STATE_VECTOR_LENGTH" : {
+		"OH":"1"
+	},
+	"SPECIAL_CLUSTER_FILES" : {
+		"OH":"/n/holyscratch01/jacob_lab/dpendergrass/GC-LETKF/input_data/OH_global_cluster.nc"
+	},
 	"comment009" : "******************************************************************************",
 	"comment010" : "**********************SPECIFY BELOW HISTORY.RC SETTINGS**********************",
 	"comment011" : "******************************************************************************",

@@ -63,9 +63,11 @@ class GT_Container(object):
 	def updateRestartsAndScalingFactors(self):
 		for i in self.ensemble_numbers:
 			self.gt[i].reconstructArrays(self.analysisEnsemble[:,i-1])
-	def saveRestartsAndScalingFactors(self,saveRestart=True, saveEmissions=True):
+	def saveRestartsAndScalingFactors(self,saveRestart=True, saveEmissions=True, saveSpecial=True):
 		for i in self.ensemble_numbers:
 			if saveRestart:
 				self.gt[i].saveRestart()
 			if saveEmissions:
 				self.gt[i].saveEmissions()
+			if saveSpecial:
+				self.gt[i].saveSpecial()

@@ -25,7 +25,7 @@ class GC_Translator(object):
 			print(f"GC_translator number {self.num} has been called for directory {path_to_rundir} and restart {self.filename}; construction beginning")
 		else:
 			self.num=None
-		self.data = DataBundle(self.filename,self.emis_sf_filenames,self.species_config,self.timestamp,self.timestamp_as_date,self.useLognormal,self.verbose,self.num)
+		self.data = DataBundle(self.filename,self.emis_sf_filenames,path_to_rundir,self.species_config,self.timestamp,self.timestamp_as_date,self.useLognormal,self.verbose,self.num)
 		if computeStateVec:
 			self.statevec = StateVector(StateVecType=self.StateVecType,data=self.data,species_config=self.species_config,emis_sf_filenames=self.emis_sf_filenames,verbose=self.verbose,num=self.num)
 		else:
@@ -63,6 +63,8 @@ class GC_Translator(object):
 		return self.data.getEmisLon(species)
 	def addEmisSF(self, species, emis2d): #Add 2d emissions scaling factors to the end of the emissions scaling factor
 		self.data.addEmisSF(species, emis2d)
+	def addUpdatedSpecialSF(self, species,special_vector): #Add special scaling factors to the end of the specially defined files
+		self.data.addUpdatedSpecialSF(species, special_vector)
 	######    END FUNCTIONS THAT ALIAS DATA BUNDLE    ########
 	######    BEGIN FUNCTIONS THAT ALIAS STATEVECTOR    ########
 	def getLocalizedStateVectorIndices(self,latind,lonind):
@@ -132,6 +134,12 @@ class GC_Translator(object):
 			analysis_emis_2d = np.reshape(analysis_subset,emis_shape) #Unflattens with 'C' order in python
 			self.addEmisSF(spec_emis,analysis_emis_2d)
 			counter+=1
+		for spec_special in self.species_config['SPECIAL_TARGET_IN_HEMCO'].keys():
+			index_start = np.sum(self.statevec.statevec_lengths[0:counter])
+			index_end = np.sum(self.statevec.statevec_lengths[0:(counter+1)])
+			analysis_subset = analysis_vector[index_start:index_end]
+			self.addUpdatedSpecialSF(spec_special,analysis_subset)
+			counter+=1
 	def saveRestart(self):
 		self.data.restart_ds["time"] = (["time"], np.array([0]), {"long_name": "Time", "calendar": "gregorian", "axis":"T", "units":self.timestring})
 		self.data.restart_ds.to_netcdf(self.filename)
@@ -141,12 +149,18 @@ class GC_Translator(object):
 			if self.useLognormal:
 				self.data.emis_ds_list[name]['Scalar'] = np.exp(self.data.emis_ds_list[name]['Scalar']) #Right before saving, transform back to lognormal space if we are using lognormal errors
 			self.data.emis_ds_list[name].to_netcdf(file)
+	def saveSpecial(self):
+		for species in list(self.data.special_ds_list.keys()):
+			self.data.special_ds_list[species]['2D'].to_netcdf(self.data.special_ds_list[species]['2Dpath'])
+			np.save(self.data.special_ds_list[species]['statepath'],self.data.special_ds_list[species]['state'])
+
 
 #Handles data getting and setting for emissions and concentrations.
 #Class exists to prevent mutual dependencies.
 class DataBundle(object):
-	def __init__(self,rst_filename,emis_sf_filenames,species_config,timestamp_as_string,timestamp_as_date,useLognormal,verbose,num=None):
+	def __init__(self,rst_filename,emis_sf_filenames,path_to_rundir,species_config,timestamp_as_string,timestamp_as_date,useLognormal,verbose,num=None):
 		self.restart_ds = xr.load_dataset(rst_filename)
+		self.path_to_rundir = path_to_rundir
 		self.species_config = species_config
 		self.verbose = verbose
 		self.timestamp = timestamp_as_string
@@ -164,6 +178,14 @@ class DataBundle(object):
 					print(f"GC_translator number {self.num} has log transformed scaling factors for {name}")
 			if self.verbose>=3:
 				print(f"GC_translator number {self.num} has loaded scaling factors for {name}")
+		self.special_ds_list = {}
+		for spec_special in self.species_config['SPECIAL_TARGET_IN_HEMCO'].keys():
+			self.special_ds_list[spec_special] = {}
+			self.special_ds_list[spec_special]['2Dpath'] = f"{self.path_to_rundir}{spec_special}_SCALEFACTOR_SPECIAL.nc"
+			self.special_ds_list[spec_special]['2D'] = xr.load_dataset(self.special_ds_list[spec_special]['2Dpath'])
+			self.special_ds_list[spec_special]['statepath'] = f"{self.path_to_rundir}{spec_special}_SCALEFACTOR_SPECIAL.npy"
+			self.special_ds_list[spec_special]['state'] = np.load(self.special_ds_list[spec_special]['statepath'])
+			self.special_ds_list[spec_special]['cluster'] = xr.load_dataset(self.species_config['SPECIAL_CLUSTER_FILES'][spec_special])
 	#Since only one timestamp, returns in format lev,lat,lon
 	def getSpecies3Dconc(self, species):
 		da = np.array(self.restart_ds[f'SpeciesRst_{species}']).squeeze()
@@ -227,9 +249,6 @@ class DataBundle(object):
 		return np.array(self.emis_ds_list[species]['lon'])
 	#Add 2d emissions scaling factors to the end of the emissions scaling factor
 	def addEmisSF(self, species, emis2d):
-		timelist = self.getEmisTime()
-		last_time = timelist[-1]
-		#new_last_time = last_time+np.timedelta64(assim_time,'h') #Add assim time hours to the last timestamp
 		tstr = f'{self.timestamp[0:4]}-{self.timestamp[4:6]}-{self.timestamp[6:8]}T{self.timestamp[9:11]}:{self.timestamp[11:13]}:00.000000000'
 		new_last_time = np.datetime64(tstr)
 		if self.species_config['DO_ENS_SPINUP']=='true':
@@ -240,28 +259,56 @@ class DataBundle(object):
 		END_DATE = self.species_config['END_DATE']
 		end_timestamp = f'{END_DATE[0:4]}-{END_DATE[4:6]}-{END_DATE[6:8]}'
 		#Create dataset with this timestep's scaling factors
-		ds = xr.Dataset(
-			{"Scalar": (("time","lat","lon"), np.expand_dims(emis2d,axis = 0),{"long_name": "Scaling factor", "units":"1"})},
-			coords={
-				"time": (["time"], np.array([new_last_time]), {"long_name": "time", "calendar": "standard", "units":f"hours since {orig_timestamp} 00:00:00"}),
-				"lat": (["lat"], self.getEmisLat(species),{"long_name": "Latitude", "units":"degrees_north"}),
-				"lon": (["lon"], self.getEmisLon(species),{"long_name": "Longitude", "units":"degrees_east"})
-			},
-			attrs={
-				"Title":"CHEEREIO scaling factors",
-				"Conventions":"COARDS",
-				"Format":"NetCDF-4",
-				"Model":"GENERIC",
-				"NLayers":"1",
-				"History":f"The LETKF utility added new scaling factors on {str(date.today())}",
-				"Start_Date":f"{orig_timestamp}",
-				"Start_Time":"0",
-				"End_Date":f"{end_timestamp}",
-				"End_Time":"0"
-			}
-		)
+		ds = makeDatasetToConcat(emis2d,self.getEmisLat(species),self.getEmisLon(species),new_last_time,orig_timestamp,end_timestamp)
 		self.emis_ds_list[species] = xr.concat([self.emis_ds_list[species],ds],dim = 'time') #Concatenate
+	def addUpdatedSpecialSF(self, species,special_vector): #Add special scaling factors to the end of the specially defined files
+		tstr = f'{self.timestamp[0:4]}-{self.timestamp[4:6]}-{self.timestamp[6:8]}T{self.timestamp[9:11]}:{self.timestamp[11:13]}:00.000000000'
+		new_last_time = np.datetime64(tstr)
+		if self.species_config['DO_ENS_SPINUP']=='true':
+			START_DATE = self.species_config['ENS_SPINUP_START']
+		else:
+			START_DATE = self.species_config['START_DATE']
+		orig_timestamp = f'{START_DATE[0:4]}-{START_DATE[4:6]}-{START_DATE[6:8]}' #Start date from  JSON
+		END_DATE = self.species_config['END_DATE']
+		end_timestamp = f'{END_DATE[0:4]}-{END_DATE[4:6]}-{END_DATE[6:8]}'
+		#Update state vector component
+		self.special_ds_list[spec_special]['state'] = special_vector
+		#Update 2D file for GC
+		special2d = np.zeros(np.shape(self.special_ds_list[species]['cluster']))
+		#Copy value into 2D for input into GC
+		for i in range(1,int(self.species_config['SPECIAL_ENTRY_STATE_VECTOR_LENGTH'][species])+1):
+			value = special_vector[i-1]
+			inds = np.where(np.abs(self.special_ds_list[species]['cluster']-i)<0.0001)
+			special2d[inds[0],inds[1]] = value
+		#Create dataset with this timestep's scaling factors
+		ds = makeDatasetToConcat(special2d,self.getEmisLat(species),self.getEmisLon(species),new_last_time,orig_timestamp,end_timestamp)
+		#Combine with 2D file
+		self.special_ds_list[spec_special]['2D'] = xr.concat([self.special_ds_list[spec_special]['2D'],ds],dim = 'time') #Concatenate
+			
 
+
+def makeDatasetToConcat(data2d,lat,lon,new_last_time,orig_timestamp,end_timestamp):
+	ds = xr.Dataset(
+		{"Scalar": (("time","lat","lon"), np.expand_dims(data2d,axis = 0),{"long_name": "Scaling factor", "units":"1"})},
+		coords={
+			"time": (["time"], np.array([new_last_time]), {"long_name": "time", "calendar": "standard", "units":f"hours since {orig_timestamp} 00:00:00"}),
+			"lat": (["lat"], lat,{"long_name": "Latitude", "units":"degrees_north"}),
+			"lon": (["lon"], lon,{"long_name": "Longitude", "units":"degrees_east"})
+		},
+		attrs={
+			"Title":"CHEEREIO scaling factors",
+			"Conventions":"COARDS",
+			"Format":"NetCDF-4",
+			"Model":"GENERIC",
+			"NLayers":"1",
+			"History":f"The LETKF utility added new scaling factors on {str(date.today())}",
+			"Start_Date":f"{orig_timestamp}",
+			"Start_Time":"0",
+			"End_Date":f"{end_timestamp}",
+			"End_Time":"0"
+		}
+	)
+	return ds
 
 class StateVector(object):
 	def __init__(self,StateVecType,data,species_config,emis_sf_filenames,verbose,num=None):
@@ -303,6 +350,10 @@ class StateVector(object):
 		else:
 			for spec_emis in self.species_config['CONTROL_VECTOR_EMIS'].keys():
 				statevec_components.append(self.data.getEmisSF(spec_emis).flatten())
+		#Add special components
+		for spec_special in self.species_config['SPECIAL_TARGET_IN_HEMCO'].keys():
+			FIXME statevec_components.append(self.data.getEmisSF(spec_emis).flatten()) 
+
 		self.statevec_lengths = np.array([len(vec) for vec in statevec_components])
 		self.statevec = np.concatenate(statevec_components)
 		if self.verbose>=3:
